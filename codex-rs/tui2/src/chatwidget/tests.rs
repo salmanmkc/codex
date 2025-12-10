@@ -10,6 +10,7 @@ use codex_core::CodexAuth;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigToml;
+use codex_core::config::Constrained;
 use codex_core::openai_models::models_manager::ModelsManager;
 use codex_core::protocol::AgentMessageDeltaEvent;
 use codex_core::protocol::AgentMessageEvent;
@@ -2088,7 +2089,7 @@ fn approval_modal_exec_snapshot() {
     // Build a chat widget with manual channels to avoid spawning the agent.
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None);
     // Ensure policy allows surfacing approvals explicitly (not strictly required for direct event).
-    chat.config.approval_policy = AskForApproval::OnRequest;
+    chat.config.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
     // Inject an exec approval request to display the approval modal.
     let ev = ExecApprovalRequestEvent {
         call_id: "call-approve-cmd".into(),
@@ -2141,7 +2142,7 @@ fn approval_modal_exec_snapshot() {
 #[test]
 fn approval_modal_exec_without_reason_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None);
-    chat.config.approval_policy = AskForApproval::OnRequest;
+    chat.config.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
 
     let ev = ExecApprovalRequestEvent {
         call_id: "call-approve-cmd-noreason".into(),
@@ -2179,7 +2180,7 @@ fn approval_modal_exec_without_reason_snapshot() {
 #[test]
 fn approval_modal_patch_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None);
-    chat.config.approval_policy = AskForApproval::OnRequest;
+    chat.config.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
 
     // Build a small changeset and a reason/grant_root to exercise the prompt text.
     let mut changes = HashMap::new();
@@ -2778,7 +2779,7 @@ fn apply_patch_full_flow_integration_like() {
 fn apply_patch_untrusted_shows_approval_modal() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None);
     // Ensure approval policy is untrusted (OnRequest)
-    chat.config.approval_policy = AskForApproval::OnRequest;
+    chat.config.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
 
     // Simulate a patch approval request from backend
     let mut changes = HashMap::new();
@@ -2824,7 +2825,7 @@ fn apply_patch_request_shows_diff_summary() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None);
 
     // Ensure we are in OnRequest so an approval is surfaced
-    chat.config.approval_policy = AskForApproval::OnRequest;
+    chat.config.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
 
     // Simulate backend asking to apply a patch adding two lines to README.md
     let mut changes = HashMap::new();

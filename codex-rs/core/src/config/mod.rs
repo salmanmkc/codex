@@ -1,4 +1,5 @@
 use crate::auth::AuthCredentialsStoreMode;
+use crate::config::types::AdminPolicyToml;
 use crate::config::types::DEFAULT_OTEL_ENVIRONMENT;
 use crate::config::types::History;
 use crate::config::types::McpServerConfig;
@@ -54,10 +55,14 @@ use crate::config::profile::ConfigProfile;
 use toml::Value as TomlValue;
 use toml_edit::DocumentMut;
 
+mod constraint;
 pub mod edit;
 pub mod profile;
 pub mod service;
 pub mod types;
+pub use constraint::Constrained;
+pub use constraint::ConstraintError;
+pub use constraint::ConstraintResult;
 
 pub use service::ConfigService;
 pub use service::ConfigServiceError;
@@ -72,6 +77,13 @@ pub use codex_git::GhostSnapshotConfig;
 pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
+
+const ALL_APPROVAL_POLICIES: [AskForApproval; 4] = [
+    AskForApproval::UnlessTrusted,
+    AskForApproval::OnFailure,
+    AskForApproval::OnRequest,
+    AskForApproval::Never,
+];
 
 #[cfg(test)]
 pub(crate) fn test_config() -> Config {
@@ -106,7 +118,7 @@ pub struct Config {
     pub model_provider: ModelProviderInfo,
 
     /// Approval policy for executing commands.
-    pub approval_policy: AskForApproval,
+    pub approval_policy: Constrained<AskForApproval>,
 
     pub sandbox_policy: SandboxPolicy,
 
@@ -550,6 +562,8 @@ pub struct ConfigToml {
 
     /// Default approval policy for executing commands.
     pub approval_policy: Option<AskForApproval>,
+    /// Admin-controlled guardrails for approval policy selection.
+    pub admin_policy: Option<AdminPolicyToml>,
 
     #[serde(default)]
     pub shell_environment_policy: ShellEnvironmentPolicyToml,
@@ -1021,20 +1035,37 @@ impl Config {
                 }
             }
         }
+        let allowed_approval_policies = cfg
+            .admin_policy
+            .as_ref()
+            .and_then(|policy| policy.allowed_approval_policies.clone())
+            .unwrap_or_else(|| ALL_APPROVAL_POLICIES.to_vec());
         let approval_policy = approval_policy_override
             .or(config_profile.approval_policy)
             .or(cfg.approval_policy)
-            .unwrap_or_else(|| {
-                if active_project.is_trusted() {
-                    // If no explicit approval policy is set, but we trust cwd, default to OnRequest
-                    AskForApproval::OnRequest
-                } else if active_project.is_untrusted() {
-                    // If project is explicitly marked untrusted, require approval for non-safe commands
-                    AskForApproval::UnlessTrusted
+            .or_else(|| {
+                if active_project.is_trusted()
+                    && allowed_approval_policies.contains(&AskForApproval::OnRequest)
+                {
+                    Some(AskForApproval::OnRequest)
+                } else if active_project.is_untrusted()
+                    && allowed_approval_policies.contains(&AskForApproval::UnlessTrusted)
+                {
+                    Some(AskForApproval::UnlessTrusted)
+                } else if allowed_approval_policies.contains(&AskForApproval::default()) {
+                    Some(AskForApproval::default())
                 } else {
-                    AskForApproval::default()
+                    allowed_approval_policies.first().cloned()
                 }
-            });
+            })
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "admin policy allowed_approval_policies must include at least one value",
+                )
+            })?;
+        let approval_policy =
+            Constrained::allow_values(approval_policy, allowed_approval_policies)?;
         let did_user_set_custom_approval_policy_or_sandbox_mode = approval_policy_override
             .is_some()
             || config_profile.approval_policy.is_some()
@@ -2945,7 +2976,7 @@ model_verbosity = "high"
                 model_auto_compact_token_limit: None,
                 model_provider_id: "openai".to_string(),
                 model_provider: fixture.openai_provider.clone(),
-                approval_policy: AskForApproval::Never,
+                approval_policy: Constrained::allow_any(AskForApproval::Never),
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 did_user_set_custom_approval_policy_or_sandbox_mode: true,
                 forced_auto_mode_downgraded_on_windows: false,
@@ -3020,7 +3051,7 @@ model_verbosity = "high"
             model_auto_compact_token_limit: None,
             model_provider_id: "openai-chat-completions".to_string(),
             model_provider: fixture.openai_chat_completions_provider.clone(),
-            approval_policy: AskForApproval::UnlessTrusted,
+            approval_policy: Constrained::allow_any(AskForApproval::UnlessTrusted),
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             forced_auto_mode_downgraded_on_windows: false,
@@ -3110,7 +3141,7 @@ model_verbosity = "high"
             model_auto_compact_token_limit: None,
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
-            approval_policy: AskForApproval::OnFailure,
+            approval_policy: Constrained::allow_any(AskForApproval::OnFailure),
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             forced_auto_mode_downgraded_on_windows: false,
@@ -3186,7 +3217,7 @@ model_verbosity = "high"
             model_auto_compact_token_limit: None,
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
-            approval_policy: AskForApproval::OnFailure,
+            approval_policy: Constrained::allow_any(AskForApproval::OnFailure),
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             forced_auto_mode_downgraded_on_windows: false,
@@ -3500,26 +3531,57 @@ trust_level = "untrusted"
     }
 
     #[test]
-    fn test_untrusted_project_gets_unless_trusted_approval_policy() -> std::io::Result<()> {
+    fn test_trusted_project_default_clamps_to_admin_allowed_approval_policy() -> anyhow::Result<()>
+    {
         let codex_home = TempDir::new()?;
         let test_project_dir = TempDir::new()?;
         let test_path = test_project_dir.path();
 
-        let mut projects = std::collections::HashMap::new();
-        projects.insert(
-            test_path.to_string_lossy().to_string(),
-            ProjectConfig {
-                trust_level: Some(TrustLevel::Untrusted),
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml {
+                admin_policy: Some(AdminPolicyToml {
+                    allowed_approval_policies: Some(vec![AskForApproval::UnlessTrusted]),
+                }),
+                projects: Some(HashMap::from([(
+                    test_path.to_string_lossy().to_string(),
+                    ProjectConfig {
+                        trust_level: Some(TrustLevel::Trusted),
+                    },
+                )])),
+                ..Default::default()
             },
+            ConfigOverrides {
+                cwd: Some(test_path.to_path_buf()),
+                ..Default::default()
+            },
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(
+            config.approval_policy.value(),
+            AskForApproval::UnlessTrusted,
+            "Expected approval policy to clamp to admin allowed list when default is disallowed"
         );
 
-        let cfg = ConfigToml {
-            projects: Some(projects),
-            ..Default::default()
-        };
+        Ok(())
+    }
+
+    #[test]
+    fn test_untrusted_project_gets_unless_trusted_approval_policy() -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+        let test_project_dir = TempDir::new()?;
+        let test_path = test_project_dir.path();
 
         let config = Config::load_from_base_config_with_overrides(
-            cfg,
+            ConfigToml {
+                projects: Some(HashMap::from([(
+                    test_path.to_string_lossy().to_string(),
+                    ProjectConfig {
+                        trust_level: Some(TrustLevel::Untrusted),
+                    },
+                )])),
+                ..Default::default()
+            },
             ConfigOverrides {
                 cwd: Some(test_path.to_path_buf()),
                 ..Default::default()
@@ -3529,7 +3591,7 @@ trust_level = "untrusted"
 
         // Verify that untrusted projects get UnlessTrusted approval policy
         assert_eq!(
-            config.approval_policy,
+            config.approval_policy.value(),
             AskForApproval::UnlessTrusted,
             "Expected UnlessTrusted approval policy for untrusted project"
         );
