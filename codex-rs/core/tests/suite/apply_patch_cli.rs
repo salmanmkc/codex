@@ -741,8 +741,8 @@ async fn apply_patch_cli_can_use_shell_command_output_as_patch_input() -> Result
     fn stdout_from_shell_output(output: &str) -> String {
         let normalized = output.replace("\r\n", "\n").replace('\r', "\n");
         normalized
-            .splitn(2, "Output:\n")
-            .nth(1)
+            .split_once("Output:\n")
+            .map(|x| x.1)
             .unwrap_or("")
             .trim_end_matches('\n')
             .to_string()
