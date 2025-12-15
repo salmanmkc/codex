@@ -1,0 +1,196 @@
+name: macos-code-sign
+description: Sign and notarize macOS binaries using Apple Developer ID + notarytool.
+inputs:
+  target:
+    description: Target triple for the artifacts to sign.
+    required: true
+  artifacts-dir:
+    description: Absolute path to the directory containing built binaries to sign.
+    required: true
+  apple-certificate:
+    description: Base64-encoded .p12 certificate for codesign.
+    required: true
+  apple-certificate-password:
+    description: Password for the .p12 certificate.
+    required: true
+  apple-notarization-key-p8:
+    description: Base64-encoded App Store Connect API key (.p8) for notarytool.
+    required: true
+  apple-notarization-key-id:
+    description: App Store Connect API key ID.
+    required: true
+  apple-notarization-issuer-id:
+    description: App Store Connect issuer ID.
+    required: true
+  binaries:
+    description: Newline-separated list of binary file names to sign+notarize.
+    required: false
+    default: |
+      codex
+      codex-responses-api-proxy
+
+runs:
+  using: composite
+  steps:
+    - name: Sign and notarize macOS binaries
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        ARTIFACTS_DIR: ${{ inputs.artifacts-dir }}
+        APPLE_CERTIFICATE: ${{ inputs.apple-certificate }}
+        APPLE_CERTIFICATE_PASSWORD: ${{ inputs.apple-certificate-password }}
+        APPLE_NOTARIZATION_KEY_P8: ${{ inputs.apple-notarization-key-p8 }}
+        APPLE_NOTARIZATION_KEY_ID: ${{ inputs.apple-notarization-key-id }}
+        APPLE_NOTARIZATION_ISSUER_ID: ${{ inputs.apple-notarization-issuer-id }}
+        BINARIES: ${{ inputs.binaries }}
+        KEYCHAIN_PASSWORD: actions
+      run: |
+        set -euo pipefail
+
+        if [[ ! -d "${ARTIFACTS_DIR}" ]]; then
+          echo "Artifacts directory ${ARTIFACTS_DIR} does not exist"
+          exit 1
+        fi
+
+        cert_path="${RUNNER_TEMP}/apple_signing_certificate.p12"
+        notary_key_path="${RUNNER_TEMP}/notarytool.key.p8"
+        keychain_path="${RUNNER_TEMP}/codex-signing-${TARGET}.keychain-db"
+
+        existing_keychains=()
+        existing_default_keychain=""
+
+        cleanup() {
+          rm -f "$cert_path" "$notary_key_path" || true
+
+          if [[ -n "${existing_default_keychain}" ]]; then
+            security default-keychain -s "${existing_default_keychain}" || true
+          fi
+          if ((${#existing_keychains[@]} > 0)); then
+            security list-keychains -s "${existing_keychains[@]}" || true
+          fi
+
+          if [[ -f "${keychain_path}" ]]; then
+            security delete-keychain "${keychain_path}" || true
+          fi
+        }
+        trap cleanup EXIT
+
+        while IFS= read -r keychain; do
+          keychain="${keychain//\"/}"
+          keychain="${keychain#"${keychain%%[![:space:]]*}"}"
+          keychain="${keychain%"${keychain##*[![:space:]]}"}"
+          [[ -n "$keychain" ]] && existing_keychains+=("$keychain")
+        done < <(security list-keychains)
+
+        existing_default_keychain="$(security default-keychain | sed -n 's/.*"\(.*\)".*/\1/p')"
+
+        echo "::group::Configure Apple code signing keychain"
+        if [[ -z "${APPLE_CERTIFICATE:-}" ]]; then
+          echo "apple-certificate is required for macOS signing"
+          exit 1
+        fi
+        if [[ -z "${APPLE_CERTIFICATE_PASSWORD:-}" ]]; then
+          echo "apple-certificate-password is required for macOS signing"
+          exit 1
+        fi
+        echo "${APPLE_CERTIFICATE}" | base64 -d > "${cert_path}"
+
+        security create-keychain -p "${KEYCHAIN_PASSWORD}" "${keychain_path}"
+        security set-keychain-settings -lut 21600 "${keychain_path}"
+        security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${keychain_path}"
+
+        if ((${#existing_keychains[@]} > 0)); then
+          security list-keychains -s "${keychain_path}" "${existing_keychains[@]}"
+        else
+          security list-keychains -s "${keychain_path}"
+        fi
+        security default-keychain -s "${keychain_path}"
+
+        security import "${cert_path}" \
+          -k "${keychain_path}" \
+          -P "${APPLE_CERTIFICATE_PASSWORD}" \
+          -T /usr/bin/codesign \
+          -T /usr/bin/security
+        security set-key-partition-list -S apple-tool:,apple: -s -k "${KEYCHAIN_PASSWORD}" "${keychain_path}" > /dev/null
+
+        codesign_hashes=()
+        while IFS= read -r hash; do
+          [[ -n "$hash" ]] && codesign_hashes+=("$hash")
+        done < <(security find-identity -v -p codesigning "${keychain_path}" \
+          | sed -n 's/.*\([0-9A-F]\{40\}\).*/\1/p' \
+          | sort -u)
+
+        if ((${#codesign_hashes[@]} == 0)); then
+          echo "No signing identities found in ${keychain_path}"
+          exit 1
+        fi
+        if ((${#codesign_hashes[@]} > 1)); then
+          echo "Multiple signing identities found in ${keychain_path}:"
+          printf '  %s\n' "${codesign_hashes[@]}"
+          exit 1
+        fi
+
+        apple_codesign_identity="${codesign_hashes[0]}"
+        echo "::add-mask::${apple_codesign_identity}"
+        echo "::endgroup::"
+
+        echo "::group::Codesign macOS binaries"
+        while IFS= read -r binary; do
+          [[ -z "$binary" ]] && continue
+          artifact="${ARTIFACTS_DIR}/${binary}"
+          if [[ ! -f "${artifact}" ]]; then
+            echo "Binary ${artifact} not found"
+            exit 1
+          fi
+          codesign \
+            --force \
+            --options runtime \
+            --timestamp \
+            --sign "${apple_codesign_identity}" \
+            --keychain "${keychain_path}" \
+            "${artifact}"
+        done <<< "${BINARIES}"
+        echo "::endgroup::"
+
+        echo "::group::Notarize macOS binaries"
+        for var in APPLE_NOTARIZATION_KEY_P8 APPLE_NOTARIZATION_KEY_ID APPLE_NOTARIZATION_ISSUER_ID; do
+          if [[ -z "${!var:-}" ]]; then
+            echo "${var} is required for notarization"
+            exit 1
+          fi
+        done
+        echo "${APPLE_NOTARIZATION_KEY_P8}" | base64 -d > "${notary_key_path}"
+
+        while IFS= read -r binary; do
+          [[ -z "$binary" ]] && continue
+          source_path="${ARTIFACTS_DIR}/${binary}"
+          archive_path="${RUNNER_TEMP}/${binary}-${TARGET}.zip"
+
+          rm -f "${archive_path}"
+          ditto -c -k --keepParent "${source_path}" "${archive_path}"
+
+          submission_json="$(
+            xcrun notarytool submit "${archive_path}" \
+              --key "${notary_key_path}" \
+              --key-id "${APPLE_NOTARIZATION_KEY_ID}" \
+              --issuer "${APPLE_NOTARIZATION_ISSUER_ID}" \
+              --output-format json \
+              --wait
+          )"
+
+          status="$(printf '%s\n' "${submission_json}" | jq -r '.status // "Unknown"')"
+          submission_id="$(printf '%s\n' "${submission_json}" | jq -r '.id // ""')"
+
+          if [[ -z "${submission_id}" ]]; then
+            echo "Failed to retrieve submission ID for ${binary}"
+            exit 1
+          fi
+
+          echo "::notice title=Notarization::${binary} submission ${submission_id} completed with status ${status}"
+          if [[ "${status}" != "Accepted" ]]; then
+            echo "Notarization failed for ${binary} (submission ${submission_id}, status ${status})"
+            exit 1
+          fi
+        done <<< "${BINARIES}"
+        echo "::endgroup::"
+
