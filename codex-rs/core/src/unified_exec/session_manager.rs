@@ -14,6 +14,7 @@ use tracing::warn;
 use crate::bash::extract_bash_command;
 use crate::codex::Session;
 use crate::codex::TurnContext;
+use crate::config::types::ShellEnvironmentPolicy;
 use crate::exec_env::create_env;
 use crate::exec_policy::create_exec_approval_requirement_for_command;
 use crate::protocol::BackgroundEventEvent;
@@ -79,7 +80,11 @@ struct PreparedSessionHandles {
 }
 
 impl UnifiedExecSessionManager {
-    pub(crate) async fn unified_exec_available(&self, command: &[String]) -> bool {
+    pub(crate) async fn unified_exec_available(
+        &self,
+        command: &[String],
+        shell_environment_policy: &ShellEnvironmentPolicy,
+    ) -> bool {
         {
             let availability = self.availability.lock().await;
             if let Some(available) = *availability {
@@ -87,20 +92,23 @@ impl UnifiedExecSessionManager {
             }
         }
 
-        let available = Self::probe_unified_exec_heartbeat(command).await;
+        let available = Self::probe_unified_exec_heartbeat(command, shell_environment_policy).await;
 
         let mut availability = self.availability.lock().await;
         *availability = Some(available);
         available
     }
 
-    async fn probe_unified_exec_heartbeat(command: &[String]) -> bool {
+    async fn probe_unified_exec_heartbeat(
+        command: &[String],
+        shell_environment_policy: &ShellEnvironmentPolicy,
+    ) -> bool {
         let Some((program, args)) = command.split_first() else {
             warn!("unified exec heartbeat failed: missing command");
             return false;
         };
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let env = HashMap::new();
+        let env = apply_unified_exec_env(create_env(shell_environment_policy));
 
         match codex_utils_pty::spawn_pty_process(program, args, &cwd, &env, &None).await {
             Ok(spawned) => {

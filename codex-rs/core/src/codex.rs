@@ -890,7 +890,7 @@ impl Session {
             if !self
                 .services
                 .unified_exec_manager
-                .unified_exec_available(&hb_command)
+                .unified_exec_available(&hb_command, &turn_context.shell_environment_policy)
                 .await
             {
                 turn_context.tools_config.shell_type = ConfigShellToolType::ShellCommand;
