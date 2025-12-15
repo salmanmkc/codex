@@ -32,6 +32,7 @@ use async_channel::Sender;
 use codex_protocol::ConversationId;
 use codex_protocol::approvals::ExecPolicyAmendment;
 use codex_protocol::items::TurnItem;
+use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::HasLegacyEvent;
 use codex_protocol::protocol::ItemCompletedEvent;
@@ -880,6 +881,21 @@ impl Session {
             self.conversation_id,
             sub_id,
         );
+        // Check if `unified_exec` is supported by the OS. Fallback on ShellCommand otherwise.
+        if matches!(
+            turn_context.tools_config.shell_type,
+            ConfigShellToolType::UnifiedExec
+        ) {
+            let hb_command = self.user_shell().derive_exec_args("exit 0", false);
+            if !self
+                .services
+                .unified_exec_manager
+                .unified_exec_available(&hb_command)
+                .await
+            {
+                turn_context.tools_config.shell_type = ConfigShellToolType::ShellCommand;
+            }
+        }
         if let Some(final_schema) = updates.final_output_json_schema {
             turn_context.final_output_json_schema = final_schema;
         }

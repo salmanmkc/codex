@@ -135,12 +135,14 @@ impl SessionStore {
 
 pub(crate) struct UnifiedExecSessionManager {
     session_store: Mutex<SessionStore>,
+    availability: Mutex<Option<bool>>,
 }
 
 impl Default for UnifiedExecSessionManager {
     fn default() -> Self {
         Self {
             session_store: Mutex::new(SessionStore::default()),
+            availability: Mutex::new(None),
         }
     }
 }

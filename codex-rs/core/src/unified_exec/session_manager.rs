@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use crate::bash::extract_bash_command;
 use crate::codex::Session;
@@ -78,6 +79,41 @@ struct PreparedSessionHandles {
 }
 
 impl UnifiedExecSessionManager {
+    pub(crate) async fn unified_exec_available(&self, command: &[String]) -> bool {
+        {
+            let availability = self.availability.lock().await;
+            if let Some(available) = *availability {
+                return available;
+            }
+        }
+
+        let available = Self::probe_unified_exec_heartbeat(command).await;
+
+        let mut availability = self.availability.lock().await;
+        *availability = Some(available);
+        available
+    }
+
+    async fn probe_unified_exec_heartbeat(command: &[String]) -> bool {
+        let Some((program, args)) = command.split_first() else {
+            warn!("unified exec heartbeat failed: missing command");
+            return false;
+        };
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let env = HashMap::new();
+
+        match codex_utils_pty::spawn_pty_process(program, args, &cwd, &env, &None).await {
+            Ok(spawned) => {
+                spawned.session.terminate();
+                true
+            }
+            Err(err) => {
+                warn!("unified exec heartbeat failed; falling back to other tool: {err:#}");
+                false
+            }
+        }
+    }
+
     pub(crate) async fn allocate_process_id(&self) -> String {
         loop {
             let mut store = self.session_store.lock().await;
