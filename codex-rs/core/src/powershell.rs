@@ -11,7 +11,7 @@ const POWERSHELL_FLAGS: &[&str] = &["-nologo", "-noprofile", "-command", "-c"];
 ///
 /// This must stay in sync with similar constants in other crates (e.g. codex-apply-patch),
 /// since some parsers strip this prefix before analyzing scripts.
-pub(crate) const UTF8_OUTPUT_PREFIX: &str = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$OutputEncoding=[System.Text.Encoding]::UTF8;";
+pub(crate) const UTF8_OUTPUT_PREFIX: &str = "chcp 65001 | Out-Null;$enc = [Text.UTF8Encoding]::new();[Console]::OutputEncoding = $enc;$OutputEncoding = $enc;\n";
 
 pub(crate) fn prefix_utf8_output(script: &str) -> String {
     let trimmed = script.trim_start();

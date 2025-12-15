@@ -96,7 +96,7 @@ pub enum MaybeApplyPatch {
 
 /// Prelude injected into PowerShell scripts in codex-core to force UTF-8 stdout encoding.
 /// Keep this in sync with core/src/powershell.rs.
-const POWERSHELL_UTF8_OUTPUT_PREFIX: &str = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$OutputEncoding=[System.Text.Encoding]::UTF8;";
+const POWERSHELL_UTF8_OUTPUT_PREFIX: &str = "chcp 65001 | Out-Null;$enc = [Text.UTF8Encoding]::new();[Console]::OutputEncoding = $enc;$OutputEncoding = $enc;\n";
 
 /// Both the raw PATCH argument to `apply_patch` as well as the PATCH argument
 /// parsed into hunks.

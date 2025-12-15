@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use core_test_support::responses::ev_apply_patch_call;
+use core_test_support::responses::ev_apply_patch_custom_tool_call;
 use core_test_support::responses::ev_shell_command_call;
 use core_test_support::test_codex::ApplyPatchModelOutput;
 use pretty_assertions::assert_eq;
@@ -774,9 +775,14 @@ async fn apply_patch_cli_can_use_shell_command_output_as_patch_input() -> Result
             let call_num = self.num_calls.fetch_add(1, Ordering::SeqCst);
             match call_num {
                 0 => {
+                    let command = if cfg!(windows) {
+                        "Get-Content -Encoding utf8 source.txt"
+                    } else {
+                        "cat source.txt"
+                    };
                     let body = sse(vec![
                         ev_response_created("resp-1"),
-                        ev_shell_command_call(&self.read_call_id, "cat source.txt"),
+                        ev_shell_command_call(&self.read_call_id, command),
                         ev_completed("resp-1"),
                     ]);
                     ResponseTemplate::new(200)
@@ -787,7 +793,9 @@ async fn apply_patch_cli_can_use_shell_command_output_as_patch_input() -> Result
                     let body_json: serde_json::Value =
                         request.body_json().expect("request body should be json");
                     let read_output = function_call_output_text(&body_json, &self.read_call_id);
+                    eprintln!("read_output: \n{read_output}");
                     let stdout = stdout_from_shell_output(&read_output);
+                    eprintln!("stdout: \n{stdout}");
                     let patch_lines = stdout
                         .lines()
                         .map(|line| format!("+{line}"))
@@ -797,9 +805,11 @@ async fn apply_patch_cli_can_use_shell_command_output_as_patch_input() -> Result
                         "*** Begin Patch\n*** Add File: target.txt\n{patch_lines}\n*** End Patch"
                     );
 
+                    eprintln!("patch: \n{patch}");
+
                     let body = sse(vec![
                         ev_response_created("resp-2"),
-                        ev_apply_patch_function_call(&self.apply_call_id, &patch),
+                        ev_apply_patch_custom_tool_call(&self.apply_call_id, &patch),
                         ev_completed("resp-2"),
                     ]);
                     ResponseTemplate::new(200)
