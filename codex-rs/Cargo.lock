@@ -1330,6 +1330,7 @@ dependencies = [
  "tracing-test",
  "tree-sitter",
  "tree-sitter-bash",
+ "unicode-segmentation",
  "url",
  "uuid",
  "walkdir",

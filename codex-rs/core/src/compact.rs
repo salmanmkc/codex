@@ -133,12 +133,10 @@ async fn run_compact_task_inner(
                 if retries < max_retries {
                     retries += 1;
                     let delay = backoff(retries);
-                    sess.notify_stream_error(
-                        turn_context.as_ref(),
-                        format!("Reconnecting... {retries}/{max_retries}"),
-                        e,
-                    )
-                    .await;
+                    let message =
+                        crate::error::reconnecting_status_message(retries, max_retries, &e);
+                    sess.notify_stream_error(turn_context.as_ref(), message, e)
+                        .await;
                     tokio::time::sleep(delay).await;
                     continue;
                 } else {

@@ -2390,12 +2390,9 @@ async fn run_turn(
                     // Surface retry information to any UI/front‑end so the
                     // user understands what is happening instead of staring
                     // at a seemingly frozen screen.
-                    sess.notify_stream_error(
-                        &turn_context,
-                        format!("Reconnecting... {retries}/{max_retries}"),
-                        e,
-                    )
-                    .await;
+                    let message =
+                        crate::error::reconnecting_status_message(retries, max_retries, &e);
+                    sess.notify_stream_error(&turn_context, message, e).await;
 
                     tokio::time::sleep(delay).await;
                 } else {

@@ -84,6 +84,7 @@ toml_edit = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 tree-sitter = { workspace = true }
 tree-sitter-bash = { workspace = true }
+unicode-segmentation = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4", "v5"] }
 which = { workspace = true }

@@ -18,11 +18,13 @@ use std::io;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::task::JoinError;
+use unicode_segmentation::UnicodeSegmentation;
 
 pub type Result<T> = std::result::Result<T, CodexErr>;
 
 /// Limit UI error messages to a reasonable size while keeping useful context.
 const ERROR_MESSAGE_UI_MAX_BYTES: usize = 2 * 1024; // 4 KiB
+const RETRY_STATUS_CAUSE_MAX_CHARS: usize = 80;
 
 #[derive(Error, Debug)]
 pub enum SandboxErr {
@@ -521,6 +523,66 @@ pub fn get_error_message_ui(e: &CodexErr) -> String {
         &message,
         TruncationPolicy::Bytes(ERROR_MESSAGE_UI_MAX_BYTES),
     )
+}
+
+pub(crate) fn reconnecting_status_message(
+    retries: u64,
+    max_retries: u64,
+    err: &CodexErr,
+) -> String {
+    match retry_status_cause_summary(err) {
+        Some(cause) => format!("Reconnecting... {retries}/{max_retries} ({cause})"),
+        None => format!("Reconnecting... {retries}/{max_retries}"),
+    }
+}
+
+/// Summarize the cause of a retry error for display in the status header.
+fn retry_status_cause_summary(err: &CodexErr) -> Option<String> {
+    let raw = if let CodexErr::UnexpectedStatus(unexpected) = err {
+        unexpected
+            .friendly_message()
+            .unwrap_or_else(|| unexpected.status.to_string())
+    } else if let Some(status) = err
+        .http_status_code_value()
+        .and_then(|code| StatusCode::from_u16(code).ok())
+    {
+        status.to_string()
+    } else {
+        match err {
+            CodexErr::Stream(message, _) => message.clone(),
+            CodexErr::ResponseStreamFailed(_) => "response stream connection failed".to_string(),
+            CodexErr::ConnectionFailed(_) => "connection failed".to_string(),
+            CodexErr::InternalServerError => "server error".to_string(),
+            CodexErr::Timeout => "timeout".to_string(),
+            _ => return None,
+        }
+    };
+
+    let normalized = normalize_one_line(&raw);
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(truncate_with_ellipsis(
+        &normalized,
+        RETRY_STATUS_CAUSE_MAX_CHARS,
+    ))
+}
+
+fn normalize_one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Truncate a text to the given number of graphemes, adding an ellipsis if the text is longer.
+fn truncate_with_ellipsis(text: &str, max_graphemes: usize) -> String {
+    let graphemes: Vec<&str> = text.graphemes(true).collect();
+    if graphemes.len() <= max_graphemes {
+        return text.to_string();
+    }
+    graphemes[..max_graphemes.saturating_sub(1)]
+        .iter()
+        .copied()
+        .chain(std::iter::once("…"))
+        .collect()
 }
 
 #[cfg(test)]
